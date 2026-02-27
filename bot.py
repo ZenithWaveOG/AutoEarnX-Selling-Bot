@@ -1,10 +1,33 @@
-import logging
 import os
+import logging
+import psycopg2
+import psycopg2.extras
 from datetime import datetime
+import uuid
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
+# Telegram imports
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, ConversationHandler, filters
-from supabase import create_client, Client
-import uuid
+
+# Bot token and admin ID
+BOT_TOKEN = os.getenv('BOT_TOKEN')
+ADMIN_ID = int(os.getenv('ADMIN_ID', '0'))
+
+# Database connection string
+DATABASE_URL = os.getenv('DATABASE_URL')
+if not DATABASE_URL:
+    # Fallback to individual components if DATABASE_URL not set
+    DB_HOST = os.getenv('DB_HOST', 'aws-1-ap-south-1.pooler.supabase.com')
+    DB_PORT = os.getenv('DB_PORT', '5432')
+    DB_NAME = os.getenv('DB_NAME', 'postgres')
+    DB_USER = os.getenv('DB_USER', 'postgres.epfnnoqxjierfaizufbo')
+    DB_PASSWORD = os.getenv('DB_PASSWORD')
+    
+    DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 
 # Enable logging
 logging.basicConfig(
@@ -13,34 +36,168 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Supabase setup
-SUPABASE_URL = "your_supabase_url"
-SUPABASE_KEY = "your_supabase_key"
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-# Bot token
-BOT_TOKEN = "your_bot_token"
-
-# Admin ID (replace with your Telegram user ID)
-ADMIN_ID = 123456789  # Replace with your actual admin ID
-
 # Conversation states
 AMOUNT, GIFT_CARD_CODE, GIFT_CARD_SCREENSHOT, UPI_AMOUNT, UPI_PAYER_NAME, UPI_SCREENSHOT, COUPON_QUANTITY, ADMIN_COUPON_INPUT, ADMIN_REMOVE_QUANTITY, ADMIN_PRICE_INPUT = range(10)
 
-# Coupon prices (default)
-coupon_prices = {
-    '500': 500,
-    '1K': 1000,
-    '2K': 2000,
-    '4K': 4000
-}
+# Database connection functions
+def get_db_connection():
+    """Get a database connection"""
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        return conn
+    except Exception as e:
+        logger.error(f"Database connection error: {e}")
+        raise
+
+def execute_query(query, params=None, fetch='all'):
+    """Execute a database query"""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cur.execute(query, params or ())
+        
+        if fetch == 'all':
+            result = cur.fetchall()
+        elif fetch == 'one':
+            result = cur.fetchone()
+        else:
+            result = None
+            
+        conn.commit()
+        cur.close()
+        return result
+    except Exception as e:
+        logger.error(f"Database error: {e}")
+        if conn:
+            conn.rollback()
+        raise
+    finally:
+        if conn:
+            conn.close()
+
+def execute_insert(query, params=None):
+    """Execute an insert query and return the inserted id"""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(query, params or ())
+        conn.commit()
+        inserted_id = cur.lastrowid if hasattr(cur, 'lastrowid') else None
+        cur.close()
+        return inserted_id
+    except Exception as e:
+        logger.error(f"Database insert error: {e}")
+        if conn:
+            conn.rollback()
+        raise
+    finally:
+        if conn:
+            conn.close()
+
+# Initialize database tables
+def init_database():
+    """Create tables if they don't exist"""
+    try:
+        # Users table
+        execute_query("""
+            CREATE TABLE IF NOT EXISTS users (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT UNIQUE NOT NULL,
+                username TEXT,
+                first_name TEXT,
+                last_name TEXT,
+                balance INTEGER DEFAULT 0,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            )
+        """)
+        
+        # Coupons table
+        execute_query("""
+            CREATE TABLE IF NOT EXISTS coupons (
+                id SERIAL PRIMARY KEY,
+                code TEXT UNIQUE NOT NULL,
+                type TEXT NOT NULL,
+                is_used BOOLEAN DEFAULT FALSE,
+                used_by BIGINT,
+                used_at TIMESTAMP WITH TIME ZONE,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            )
+        """)
+        
+        # Orders table
+        execute_query("""
+            CREATE TABLE IF NOT EXISTS orders (
+                id TEXT PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                coupon_code TEXT NOT NULL,
+                amount INTEGER NOT NULL,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            )
+        """)
+        
+        # Pending orders table
+        execute_query("""
+            CREATE TABLE IF NOT EXISTS pending_orders (
+                id TEXT PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                amount INTEGER NOT NULL,
+                giftcard_code TEXT,
+                payer_name TEXT,
+                screenshot_id TEXT,
+                payment_method TEXT NOT NULL,
+                status TEXT DEFAULT 'pending',
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            )
+        """)
+        
+        # Settings table
+        execute_query("""
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                qr_code_id TEXT,
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            )
+        """)
+        
+        # Prices table
+        execute_query("""
+            CREATE TABLE IF NOT EXISTS prices (
+                type TEXT PRIMARY KEY,
+                price INTEGER NOT NULL,
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            )
+        """)
+        
+        # Insert default prices if not exists
+        default_prices = [('500', 500), ('1K', 1000), ('2K', 2000), ('4K', 4000)]
+        for price_type, price in default_prices:
+            execute_query("""
+                INSERT INTO prices (type, price, updated_at)
+                VALUES (%s, %s, NOW())
+                ON CONFLICT (type) DO NOTHING
+            """, (price_type, price))
+        
+        logger.info("✅ Database tables initialized successfully")
+    except Exception as e:
+        logger.error(f"❌ Database initialization failed: {e}")
+        raise
+
+# Initialize database on startup
+try:
+    init_database()
+    logger.info("✅ Connected to database successfully!")
+except Exception as e:
+    logger.error(f"❌ Database connection failed: {e}")
+    raise
 
 # User menu keyboard
 def get_user_keyboard():
     keyboard = [
         [KeyboardButton("💰 Add Coins"), KeyboardButton("🎟️ Buy Coupon")],
         [KeyboardButton("👤 Balance"), KeyboardButton("📦 My Orders")],
-        [KeyboardButton("🆘 Support"), KeyboardButton("⚠️ Disclaimer")],
+        [KeyboardButton("🆘 Support"), KeyboardButton("⚠️ Disclaimer")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -50,7 +207,7 @@ def get_admin_keyboard():
         [KeyboardButton("➕ Add Coupon"), KeyboardButton("➖ Remove Coupon")],
         [KeyboardButton("📊 Stock"), KeyboardButton("💰 Change Prices")],
         [KeyboardButton("🔄 Update QR"), KeyboardButton("📋 Last 10 Buyers")],
-        [KeyboardButton("🔙 Back to User Menu")]
+        [KeyboardButton("👑 Admin Panel"), KeyboardButton("🔙 Back to User Menu")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -101,30 +258,49 @@ def get_admin_approval_keyboard(order_id, payment_method):
     ]
     return InlineKeyboardMarkup(keyboard)
 
+# Start command
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id
     
-    # Check if user exists in database
-    result = supabase.table('users').select('*').eq('user_id', user_id).execute()
-    
-    if not result.data:
-        # Create new user
-        supabase.table('users').insert({
-            'user_id': user_id,
-            'username': user.username,
-            'first_name': user.first_name,
-            'last_name': user.last_name,
-            'balance': 0,
-            'created_at': datetime.now().isoformat()
-        }).execute()
-    
-    await update.message.reply_text(
-        f"Welcome To The AutoEarnX Selling Bot, {user.first_name}! 🚀\n\n"
-        "Use the buttons below to navigate:",
-        reply_markup=get_user_keyboard()
+    # Check if user exists
+    result = execute_query(
+        "SELECT * FROM users WHERE user_id = %s",
+        (user_id,),
+        fetch='one'
     )
+    
+    if not result:
+        # Create new user
+        execute_query(
+            """
+            INSERT INTO users (user_id, username, first_name, last_name, balance, created_at)
+            VALUES (%s, %s, %s, %s, 0, NOW())
+            """,
+            (user_id, user.username, user.first_name, user.last_name)
+        )
+    
+    # Show appropriate keyboard (admin gets extra option)
+    if user_id == ADMIN_ID:
+        keyboard = [
+            [KeyboardButton("💰 Add Coins"), KeyboardButton("🎟️ Buy Coupon")],
+            [KeyboardButton("👤 Balance"), KeyboardButton("📦 My Orders")],
+            [KeyboardButton("🆘 Support"), KeyboardButton("⚠️ Disclaimer")],
+            [KeyboardButton("👑 Admin Panel")]
+        ]
+        await update.message.reply_text(
+            f"Welcome To The AutoEarnX Selling Bot, {user.first_name}! 🚀\n\n"
+            f"Use the buttons below to navigate:",
+            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        )
+    else:
+        await update.message.reply_text(
+            f"Welcome To The AutoEarnX Selling Bot, {user.first_name}! 🚀\n\n"
+            f"Use the buttons below to navigate:",
+            reply_markup=get_user_keyboard()
+        )
 
+# Handle user menu
 async def handle_user_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user_id = update.effective_user.id
@@ -150,16 +326,23 @@ async def handle_user_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     
     elif text == "👤 Balance":
-        result = supabase.table('users').select('balance').eq('user_id', user_id).execute()
-        balance = result.data[0]['balance'] if result.data else 0
+        result = execute_query(
+            "SELECT balance FROM users WHERE user_id = %s",
+            (user_id,),
+            fetch='one'
+        )
+        balance = result['balance'] if result else 0
         await update.message.reply_text(f"💰 Your Balance: {balance} Diamonds 🪙")
     
     elif text == "📦 My Orders":
-        result = supabase.table('orders').select('*').eq('user_id', user_id).order('created_at', desc=True).limit(10).execute()
+        result = execute_query(
+            "SELECT * FROM orders WHERE user_id = %s ORDER BY created_at DESC LIMIT 10",
+            (user_id,)
+        )
         
-        if result.data:
+        if result:
             orders_text = "📦 Your Last 10 Orders:\n\n"
-            for order in result.data:
+            for order in result:
                 orders_text += f"🆔 Order: {order['id'][:8]}...\n"
                 orders_text += f"🎟️ Coupon: {order['coupon_code']}\n"
                 orders_text += f"💰 Amount: {order['amount']} 🪙\n"
@@ -185,13 +368,14 @@ async def handle_user_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "4. If coupon shows redeem, try after some time (10-15min)."
         )
     
-    # Admin panel check
+    # Admin panel
     elif text == "👑 Admin Panel" and user_id == ADMIN_ID:
         await update.message.reply_text(
             "Welcome to Admin Panel!",
             reply_markup=get_admin_keyboard()
         )
 
+# Handle admin menu
 async def handle_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user_id = update.effective_user.id
@@ -217,8 +401,12 @@ async def handle_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Get stock for all coupon types
         stocks = {}
         for coupon_type in ['500', '1K', '2K', '4K']:
-            result = supabase.table('coupons').select('*').eq('type', coupon_type).eq('is_used', False).execute()
-            stocks[coupon_type] = len(result.data)
+            result = execute_query(
+                "SELECT COUNT(*) as count FROM coupons WHERE type = %s AND is_used = FALSE",
+                (coupon_type,),
+                fetch='one'
+            )
+            stocks[coupon_type] = result['count'] if result else 0
         
         stock_text = "📊 Current Stock:\n\n"
         stock_text += f"500 Coupons: {stocks['500']} available\n"
@@ -240,13 +428,18 @@ async def handle_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Please send the new QR code image:")
     
     elif text == "📋 Last 10 Buyers":
-        result = supabase.table('orders').select('*, users(*)').order('created_at', desc=True).limit(10).execute()
+        result = execute_query("""
+            SELECT o.*, u.username, u.first_name 
+            FROM orders o 
+            JOIN users u ON o.user_id = u.user_id 
+            ORDER BY o.created_at DESC 
+            LIMIT 10
+        """)
         
-        if result.data:
+        if result:
             buyers_text = "📋 Last 10 Buyers:\n\n"
-            for order in result.data:
-                user_info = order.get('users', {})
-                buyers_text += f"👤 User: {user_info.get('first_name', 'Unknown')} (@{user_info.get('username', 'N/A')})\n"
+            for order in result:
+                buyers_text += f"👤 User: {order['first_name']} (@{order['username'] or 'N/A'})\n"
                 buyers_text += f"🎟️ Coupon: {order['coupon_code']}\n"
                 buyers_text += f"💰 Amount: {order['amount']} 🪙\n"
                 buyers_text += f"📅 Date: {order['created_at'][:10]}\n"
@@ -261,6 +454,7 @@ async def handle_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=get_user_keyboard()
         )
 
+# Handle button callbacks
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -269,8 +463,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     
     # Get user balance
-    result = supabase.table('users').select('balance').eq('user_id', user_id).execute()
-    balance = result.data[0]['balance'] if result.data else 0
+    result = execute_query(
+        "SELECT balance FROM users WHERE user_id = %s",
+        (user_id,),
+        fetch='one'
+    )
+    balance = result['balance'] if result else 0
     
     # Terms handling
     if data == "terms_agree":
@@ -287,11 +485,21 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         coupon_type = data.replace("coupon_", "")
         context.user_data['selected_coupon'] = coupon_type
         
-        # Get stock and price
-        stock_result = supabase.table('coupons').select('*').eq('type', coupon_type).eq('is_used', False).execute()
-        stock = len(stock_result.data)
+        # Get stock
+        stock_result = execute_query(
+            "SELECT COUNT(*) as count FROM coupons WHERE type = %s AND is_used = FALSE",
+            (coupon_type,),
+            fetch='one'
+        )
+        stock = stock_result['count'] if stock_result else 0
         
-        price = coupon_prices.get(coupon_type, 0)
+        # Get price
+        price_result = execute_query(
+            "SELECT price FROM prices WHERE type = %s",
+            (coupon_type,),
+            fetch='one'
+        )
+        price = price_result['price'] if price_result else 0
         
         if stock == 0:
             await query.edit_message_text(f"❌ Not enough stock! Available: 0")
@@ -323,8 +531,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif data == "back_to_menu":
         await query.edit_message_text(
-            "Main Menu:",
-            reply_markup=get_user_keyboard()
+            "Main Menu"
         )
     
     # Admin coupon actions
@@ -350,8 +557,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         elif data == "admin_back":
             await query.edit_message_text(
-                "Admin Panel",
-                reply_markup=get_admin_keyboard()
+                "Admin Panel"
             )
     
     # Admin approval/rejection
@@ -361,17 +567,27 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         payment_method = parts[2]
         
         # Get order details
-        order_result = supabase.table('pending_orders').select('*').eq('id', order_id).execute()
-        if order_result.data:
-            order = order_result.data[0]
-            user_id = order['user_id']
-            amount = order['amount']
+        order_result = execute_query(
+            "SELECT * FROM pending_orders WHERE id = %s",
+            (order_id,),
+            fetch='one'
+        )
+        
+        if order_result:
+            user_id = order_result['user_id']
+            amount = order_result['amount']
             
             # Add balance to user
-            supabase.table('users').update({'balance': supabase.raw(f'balance + {amount}')}).eq('user_id', user_id).execute()
+            execute_query(
+                "UPDATE users SET balance = balance + %s WHERE user_id = %s",
+                (amount, user_id)
+            )
             
             # Update order status
-            supabase.table('pending_orders').update({'status': 'approved'}).eq('id', order_id).execute()
+            execute_query(
+                "UPDATE pending_orders SET status = 'approved' WHERE id = %s",
+                (order_id,)
+            )
             
             # Notify user
             await context.bot.send_message(
@@ -388,12 +604,20 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         payment_method = parts[2]
         
         # Update order status
-        supabase.table('pending_orders').update({'status': 'declined'}).eq('id', order_id).execute()
+        execute_query(
+            "UPDATE pending_orders SET status = 'declined' WHERE id = %s",
+            (order_id,)
+        )
         
         # Get user_id
-        order_result = supabase.table('pending_orders').select('user_id').eq('id', order_id).execute()
-        if order_result.data:
-            user_id = order_result.data[0]['user_id']
+        order_result = execute_query(
+            "SELECT user_id FROM pending_orders WHERE id = %s",
+            (order_id,),
+            fetch='one'
+        )
+        
+        if order_result:
+            user_id = order_result['user_id']
             
             # Notify user
             await context.bot.send_message(
@@ -403,13 +627,34 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await query.edit_message_text(f"Order {order_id} declined!")
 
+# Handle additional callbacks
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data
+    
+    if data == "submit_giftcard":
+        await query.edit_message_text("Enter your Amazon Gift Card code:")
+        context.user_data['awaiting_giftcard'] = True
+    
+    elif data == "paid_upi":
+        await query.edit_message_text("Send the payer name (person who paid):")
+        context.user_data['awaiting_payer_name'] = True
+
+# Handle messages
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text
     
-    # Handle regular menu
+    # Handle admin menu
     if user_id == ADMIN_ID and text in ["👑 Admin Panel", "➕ Add Coupon", "➖ Remove Coupon", "📊 Stock", "💰 Change Prices", "🔄 Update QR", "📋 Last 10 Buyers", "🔙 Back to User Menu"]:
         await handle_admin_menu(update, context)
+        return
+    
+    # Handle regular user menu
+    if text in ["💰 Add Coins", "🎟️ Buy Coupon", "👤 Balance", "📦 My Orders", "🆘 Support", "⚠️ Disclaimer"]:
+        await handle_user_menu(update, context)
         return
     
     # Handle coupon quantity
@@ -419,18 +664,34 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             coupon_type = context.user_data.get('selected_coupon')
             
             # Check stock
-            stock_result = supabase.table('coupons').select('*').eq('type', coupon_type).eq('is_used', False).execute()
-            stock = len(stock_result.data)
+            stock_result = execute_query(
+                "SELECT COUNT(*) as count FROM coupons WHERE type = %s AND is_used = FALSE",
+                (coupon_type,),
+                fetch='one'
+            )
+            stock = stock_result['count'] if stock_result else 0
             
             if quantity > stock:
                 await update.message.reply_text(f"❌ Not enough stock! Available: {stock}")
                 context.user_data['awaiting_quantity'] = False
                 return
             
+            # Get price
+            price_result = execute_query(
+                "SELECT price FROM prices WHERE type = %s",
+                (coupon_type,),
+                fetch='one'
+            )
+            price = price_result['price'] if price_result else 0
+            total_price = price * quantity
+            
             # Check balance
-            result = supabase.table('users').select('balance').eq('user_id', user_id).execute()
-            balance = result.data[0]['balance'] if result.data else 0
-            total_price = coupon_prices.get(coupon_type, 0) * quantity
+            balance_result = execute_query(
+                "SELECT balance FROM users WHERE user_id = %s",
+                (user_id,),
+                fetch='one'
+            )
+            balance = balance_result['balance'] if balance_result else 0
             
             if balance < total_price:
                 await update.message.reply_text(f"❌ Not enough diamonds! Available: {balance} 🪙")
@@ -438,25 +699,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             
             # Deduct balance
-            supabase.table('users').update({'balance': balance - total_price}).eq('user_id', user_id).execute()
+            execute_query(
+                "UPDATE users SET balance = balance - %s WHERE user_id = %s",
+                (total_price, user_id)
+            )
             
             # Get coupons
-            coupons = stock_result.data[:quantity]
+            coupons_result = execute_query(
+                "SELECT * FROM coupons WHERE type = %s AND is_used = FALSE LIMIT %s",
+                (coupon_type, quantity)
+            )
+            
             coupon_codes = []
-            for coupon in coupons:
-                supabase.table('coupons').update({'is_used': True, 'used_by': user_id, 'used_at': datetime.now().isoformat()}).eq('id', coupon['id']).execute()
+            for coupon in coupons_result:
+                # Mark as used
+                execute_query(
+                    "UPDATE coupons SET is_used = TRUE, used_by = %s, used_at = NOW() WHERE id = %s",
+                    (user_id, coupon['id'])
+                )
                 coupon_codes.append(coupon['code'])
             
             # Create order record
             order_id = str(uuid.uuid4())[:8]
             for code in coupon_codes:
-                supabase.table('orders').insert({
-                    'id': order_id,
-                    'user_id': user_id,
-                    'coupon_code': code,
-                    'amount': coupon_prices.get(coupon_type, 0),
-                    'created_at': datetime.now().isoformat()
-                }).execute()
+                execute_query(
+                    "INSERT INTO orders (id, user_id, coupon_code, amount, created_at) VALUES (%s, %s, %s, %s, NOW())",
+                    (order_id, user_id, code, price)
+                )
             
             await update.message.reply_text(
                 f"✅ Purchase Successful!\n\n"
@@ -511,8 +780,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['awaiting_upi_amount'] = False
             
             # Get QR code from database
-            qr_result = supabase.table('settings').select('qr_code_id').eq('key', 'upi_qr').execute()
-            qr_id = qr_result.data[0]['qr_code_id'] if qr_result.data else None
+            qr_result = execute_query(
+                "SELECT qr_code_id FROM settings WHERE key = 'upi_qr'",
+                fetch='one'
+            )
+            qr_id = qr_result['qr_code_id'] if qr_result else None
             
             order_id = str(uuid.uuid4())[:8]
             context.user_data['order_id'] = order_id
@@ -563,12 +835,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for code in coupons:
             code = code.strip()
             if code:
-                supabase.table('coupons').insert({
-                    'code': code,
-                    'type': coupon_type,
-                    'is_used': False,
-                    'created_at': datetime.now().isoformat()
-                }).execute()
+                try:
+                    execute_query(
+                        "INSERT INTO coupons (code, type, is_used, created_at) VALUES (%s, %s, FALSE, NOW())",
+                        (code, coupon_type)
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to insert coupon {code}: {e}")
+                    await update.message.reply_text(f"⚠️ Failed to insert coupon: {code}")
         
         await update.message.reply_text(f"✅ {len(coupons)} coupons added successfully!")
         context.user_data['awaiting_coupons'] = False
@@ -580,15 +854,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             coupon_type = context.user_data.get('admin_coupon_type')
             
             # Get coupons to remove
-            result = supabase.table('coupons').select('*').eq('type', coupon_type).eq('is_used', False).limit(quantity).execute()
+            coupons_result = execute_query(
+                "SELECT id FROM coupons WHERE type = %s AND is_used = FALSE LIMIT %s",
+                (coupon_type, quantity)
+            )
             
-            if len(result.data) < quantity:
-                await update.message.reply_text(f"Not enough coupons! Available: {len(result.data)}")
+            if len(coupons_result) < quantity:
+                await update.message.reply_text(f"Not enough coupons! Available: {len(coupons_result)}")
                 return
             
             # Delete coupons
-            for coupon in result.data:
-                supabase.table('coupons').delete().eq('id', coupon['id']).execute()
+            for coupon in coupons_result:
+                execute_query(
+                    "DELETE FROM coupons WHERE id = %s",
+                    (coupon['id'],)
+                )
             
             await update.message.reply_text(f"✅ {quantity} coupons removed successfully!")
             context.user_data['awaiting_remove_quantity'] = False
@@ -602,37 +882,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             price = int(text)
             coupon_type = context.user_data.get('admin_coupon_type')
             
-            # Update price in database
-            supabase.table('prices').upsert({
-                'type': coupon_type,
-                'price': price,
-                'updated_at': datetime.now().isoformat()
-            }).execute()
-            
-            # Update local variable
-            coupon_prices[coupon_type] = price
+            # Update price
+            execute_query(
+                "UPDATE prices SET price = %s, updated_at = NOW() WHERE type = %s",
+                (price, coupon_type)
+            )
             
             await update.message.reply_text(f"✅ Price for {coupon_type} changed to {price} successfully!")
             context.user_data['awaiting_price'] = False
             
         except ValueError:
             await update.message.reply_text("Please send a valid number.")
-    
-    # Admin: Update QR
-    elif context.user_data.get('awaiting_qr') and update.message.photo:
-        photo = update.message.photo[-1]
-        file_id = photo.file_id
-        
-        # Save QR code to database
-        supabase.table('settings').upsert({
-            'key': 'upi_qr',
-            'qr_code_id': file_id,
-            'updated_at': datetime.now().isoformat()
-        }).execute()
-        
-        await update.message.reply_text("✅ QR code updated successfully!")
-        context.user_data['awaiting_qr'] = False
 
+# Handle photos
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
@@ -643,16 +905,22 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Create pending order
         order_id = str(uuid.uuid4())
-        supabase.table('pending_orders').insert({
-            'id': order_id,
-            'user_id': user_id,
-            'amount': context.user_data.get('payment_amount'),
-            'giftcard_code': context.user_data.get('giftcard_code'),
-            'screenshot_id': file_id,
-            'payment_method': 'amazon',
-            'status': 'pending',
-            'created_at': datetime.now().isoformat()
-        }).execute()
+        execute_query(
+            """
+            INSERT INTO pending_orders 
+            (id, user_id, amount, giftcard_code, screenshot_id, payment_method, status, created_at) 
+            VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
+            """,
+            (
+                order_id, 
+                user_id, 
+                context.user_data.get('payment_amount'),
+                context.user_data.get('giftcard_code'),
+                file_id,
+                'amazon',
+                'pending'
+            )
+        )
         
         # Notify admin
         user_info = await context.bot.get_chat(user_id)
@@ -685,68 +953,22 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Create pending order
         order_id = str(uuid.uuid4())
-        supabase.table('pending_orders').insert({
-            'id': order_id,
-            'user_id': user_id,
-            'amount': context.user_data.get('payment_amount'),
-            'payer_name': context.user_data.get('payer_name'),
-            'screenshot_id': file_id,
-            'payment_method': 'upi',
-            'status': 'pending',
-            'created_at': datetime.now().isoformat()
-        }).execute()
+        execute_query(
+            """
+            INSERT INTO pending_orders 
+            (id, user_id, amount, payer_name, screenshot_id, payment_method, status, created_at) 
+            VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
+            """,
+            (
+                order_id,
+                user_id,
+                context.user_data.get('payment_amount'),
+                context.user_data.get('payer_name'),
+                file_id,
+                'upi',
+                'pending'
+            )
+        )
         
         # Notify admin
-        user_info = await context.bot.get_chat(user_id)
-        admin_message = (
-            f"🔔 New UPI Payment Order!\n\n"
-            f"👤 User: {user_info.full_name} (@{user_info.username})\n"
-            f"🆔 User ID: {user_id}\n"
-            f"💰 Amount: ₹{context.user_data.get('payment_amount')}\n"
-            f"👤 Payer Name: {context.user_data.get('payer_name')}\n"
-            f"📅 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-        )
-        
-        await context.bot.send_photo(
-            chat_id=ADMIN_ID,
-            photo=file_id,
-            caption=admin_message,
-            reply_markup=get_admin_approval_keyboard(order_id, 'upi')
-        )
-        
-        await update.message.reply_text(
-            "✅ Your request has been submitted! Please wait for admin approval."
-        )
-        
-        context.user_data['awaiting_upi_screenshot'] = False
-
-async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    data = query.data
-    
-    if data == "submit_giftcard":
-        await query.edit_message_text("Enter your Amazon Gift Card code:")
-        context.user_data['awaiting_giftcard'] = True
-    
-    elif data == "paid_upi":
-        await query.edit_message_text("Send the payer name (person who paid):")
-        context.user_data['awaiting_payer_name'] = True
-
-def main():
-    # Create application
-    application = Application.builder().token(BOT_TOKEN).build()
-    
-    # Add handlers
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    application.add_handler(CallbackQueryHandler(button_callback))
-    application.add_handler(CallbackQueryHandler(handle_callback, pattern="^(submit_giftcard|paid_upi)$"))
-    
-    # Start bot
-    application.run_polling()
-
-if __name__ == '__main__':
-    main()
+        user_info = await context.bot.get_chat(user_id
