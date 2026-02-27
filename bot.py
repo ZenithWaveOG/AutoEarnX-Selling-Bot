@@ -280,6 +280,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             (user_id, user.username, user.first_name, user.last_name),
             fetch='none'
         )
+        logger.info(f"New user created: {user_id}")
     
     # Show appropriate keyboard (admin gets extra option)
     if user_id == ADMIN_ID:
@@ -545,10 +546,12 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         await query.edit_message_text(
+            f"📦 **{coupon_type} Coupons**\n\n"
+            f"💎 **Price per coupon:** {price} 🪙\n"
+            f"📊 **Available stock:** {stock}\n\n"
             f"How many {coupon_type} coupons do you want to buy?\n"
-            f"Price per coupon: {price} 🪙\n"
-            f"Available stock: {stock}\n\n"
-            f"Please send the quantity:"
+            f"Please send the quantity:",
+            parse_mode='Markdown'
         )
         context.user_data['awaiting_quantity'] = True
     
@@ -691,6 +694,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     
     logger.info(f"Message from {user_id}: {text}")
+    logger.info(f"User data keys: {list(context.user_data.keys())}")
     
     # CRITICAL: Check for admin panel first
     if text == "👑 Admin Panel" and user_id == ADMIN_ID:
@@ -719,6 +723,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             quantity = int(text)
             coupon_type = context.user_data.get('selected_coupon')
             
+            if quantity <= 0:
+                await update.message.reply_text("❌ Please enter a valid positive number.")
+                return
+            
+            logger.info(f"User {user_id} wants to buy {quantity} of {coupon_type} coupons")
+            
             # Check stock
             stock_result = execute_query(
                 "SELECT COUNT(*) as count FROM coupons WHERE type = %s AND is_used = FALSE",
@@ -741,6 +751,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             price = price_result['price'] if price_result else 0
             total_price = price * quantity
             
+            logger.info(f"Price per coupon: {price}, Total: {total_price}")
+            
             # Check balance
             balance_result = execute_query(
                 "SELECT balance FROM users WHERE user_id = %s",
@@ -750,7 +762,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             balance = balance_result['balance'] if balance_result else 0
             
             if balance < total_price:
-                await update.message.reply_text(f"❌ Not enough diamonds! Available: {balance} 🪙")
+                await update.message.reply_text(f"❌ Not enough diamonds! Available: {balance} 🪙, Needed: {total_price} 🪙")
                 context.user_data['awaiting_quantity'] = False
                 return
             
@@ -760,6 +772,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 (total_price, user_id),
                 fetch='none'
             )
+            logger.info(f"Deducted {total_price} from user {user_id} balance")
             
             # Get coupons
             coupons_result = execute_query(
@@ -767,7 +780,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 (coupon_type, quantity)
             )
             
+            if not coupons_result or len(coupons_result) < quantity:
+                await update.message.reply_text(f"❌ Error: Could not retrieve coupons. Please contact support.")
+                # Refund the balance
+                execute_query(
+                    "UPDATE users SET balance = balance + %s WHERE user_id = %s",
+                    (total_price, user_id),
+                    fetch='none'
+                )
+                context.user_data['awaiting_quantity'] = False
+                return
+            
             coupon_codes = []
+            order_id = str(uuid.uuid4())[:8]
+            
             for coupon in coupons_result:
                 # Mark as used
                 execute_query(
@@ -776,26 +802,47 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     fetch='none'
                 )
                 coupon_codes.append(coupon['code'])
-            
-            # Create order record
-            order_id = str(uuid.uuid4())[:8]
-            for code in coupon_codes:
+                
+                # Create order record for each coupon
                 execute_query(
                     "INSERT INTO orders (id, user_id, coupon_code, amount, created_at) VALUES (%s, %s, %s, %s, NOW())",
-                    (order_id, user_id, code, price),
+                    (order_id, user_id, coupon['code'], price),
                     fetch='none'
                 )
             
+            # Get updated balance
+            new_balance_result = execute_query(
+                "SELECT balance FROM users WHERE user_id = %s",
+                (user_id,),
+                fetch='one'
+            )
+            new_balance = new_balance_result['balance'] if new_balance_result else 0
+            
+            # Send success message with coupons
+            coupons_text = "\n".join([f"`{code}`" for code in coupon_codes])
             await update.message.reply_text(
-                f"✅ Purchase Successful!\n\n"
-                f"Your {coupon_type} coupons:\n" + "\n".join(coupon_codes) + "\n\n"
-                f"Total spent: {total_price} 🪙"
+                f"✅ **Purchase Successful!**\n\n"
+                f"🎟️ **Coupon Type:** {coupon_type}\n"
+                f"📦 **Quantity:** {quantity}\n"
+                f"💰 **Total Spent:** {total_price} 🪙\n"
+                f"💎 **New Balance:** {new_balance} 🪙\n\n"
+                f"**Your Coupons:**\n{coupons_text}\n\n"
+                f"📝 Please save these coupons. They won't be shown again!",
+                parse_mode='Markdown'
             )
             
+            # Clear the awaiting state
             context.user_data['awaiting_quantity'] = False
+            context.user_data.pop('selected_coupon', None)
+            
+            logger.info(f"Successfully sold {quantity} {coupon_type} coupons to user {user_id}")
             
         except ValueError:
-            await update.message.reply_text("Please send a valid number.")
+            await update.message.reply_text("❌ Please send a valid number.")
+        except Exception as e:
+            logger.error(f"Error in coupon purchase: {e}")
+            await update.message.reply_text("❌ An error occurred. Please try again or contact support.")
+            context.user_data['awaiting_quantity'] = False
     
     # Handle Amazon amount
     elif context.user_data.get('awaiting_amount'):
@@ -891,6 +938,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         coupon_type = context.user_data.get('admin_coupon_type')
         coupons = text.split('\n')
         success_count = 0
+        failed_coupons = []
         
         for code in coupons:
             code = code.strip()
@@ -904,9 +952,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     success_count += 1
                 except Exception as e:
                     logger.error(f"Failed to insert coupon {code}: {e}")
-                    await update.message.reply_text(f"⚠️ Failed to insert coupon: {code}")
+                    failed_coupons.append(code)
         
-        await update.message.reply_text(f"✅ {success_count} coupons added successfully!")
+        if failed_coupons:
+            await update.message.reply_text(f"✅ {success_count} coupons added successfully!\n❌ Failed: {len(failed_coupons)} coupons (possibly duplicates)")
+        else:
+            await update.message.reply_text(f"✅ {success_count} coupons added successfully!")
+        
         context.user_data['awaiting_coupons'] = False
     
     # Admin: Remove coupons
