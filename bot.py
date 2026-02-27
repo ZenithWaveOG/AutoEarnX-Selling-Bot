@@ -76,26 +76,6 @@ def execute_query(query, params=None, fetch='all'):
         if conn:
             conn.close()
 
-def execute_insert(query, params=None):
-    """Execute an insert query and return the inserted id"""
-    conn = None
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute(query, params or ())
-        conn.commit()
-        inserted_id = cur.lastrowid if hasattr(cur, 'lastrowid') else None
-        cur.close()
-        return inserted_id
-    except Exception as e:
-        logger.error(f"Database insert error: {e}")
-        if conn:
-            conn.rollback()
-        raise
-    finally:
-        if conn:
-            conn.close()
-
 # Initialize database tables
 def init_database():
     """Create tables if they don't exist"""
@@ -449,9 +429,16 @@ async def handle_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("No orders found.")
     
     elif text == "🔙 Back to User Menu":
+        # Show admin the user menu with admin panel option
+        keyboard = [
+            [KeyboardButton("💰 Add Coins"), KeyboardButton("🎟️ Buy Coupon")],
+            [KeyboardButton("👤 Balance"), KeyboardButton("📦 My Orders")],
+            [KeyboardButton("🆘 Support"), KeyboardButton("⚠️ Disclaimer")],
+            [KeyboardButton("👑 Admin Panel")]
+        ]
         await update.message.reply_text(
             "Returning to user menu...",
-            reply_markup=get_user_keyboard()
+            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
         )
 
 # Handle button callbacks
@@ -893,6 +880,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
         except ValueError:
             await update.message.reply_text("Please send a valid number.")
+    
+    # Admin: Update QR
+    elif context.user_data.get('awaiting_qr') and update.message.photo:
+        photo = update.message.photo[-1]
+        file_id = photo.file_id
+        
+        # Save QR code to database
+        execute_query(
+            "INSERT INTO settings (key, qr_code_id, updated_at) VALUES (%s, %s, NOW()) ON CONFLICT (key) DO UPDATE SET qr_code_id = %s, updated_at = NOW()",
+            ('upi_qr', file_id, file_id)
+        )
+        
+        await update.message.reply_text("✅ QR code updated successfully!")
+        context.user_data['awaiting_qr'] = False
 
 # Handle photos
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -971,4 +972,59 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         
         # Notify admin
-        user_info = await context.bot.get_chat(user_id
+        user_info = await context.bot.get_chat(user_id)
+        admin_message = (
+            f"🔔 New UPI Payment Order!\n\n"
+            f"👤 User: {user_info.full_name} (@{user_info.username})\n"
+            f"🆔 User ID: {user_id}\n"
+            f"💰 Amount: ₹{context.user_data.get('payment_amount')}\n"
+            f"👤 Payer Name: {context.user_data.get('payer_name')}\n"
+            f"📅 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+        
+        await context.bot.send_photo(
+            chat_id=ADMIN_ID,
+            photo=file_id,
+            caption=admin_message,
+            reply_markup=get_admin_approval_keyboard(order_id, 'upi')
+        )
+        
+        await update.message.reply_text(
+            "✅ Your request has been submitted! Please wait for admin approval."
+        )
+        
+        context.user_data['awaiting_upi_screenshot'] = False
+    
+    # Handle admin QR code update
+    elif context.user_data.get('awaiting_qr'):
+        photo = update.message.photo[-1]
+        file_id = photo.file_id
+        
+        # Save QR code to database
+        execute_query(
+            "INSERT INTO settings (key, qr_code_id, updated_at) VALUES (%s, %s, NOW()) ON CONFLICT (key) DO UPDATE SET qr_code_id = %s, updated_at = NOW()",
+            ('upi_qr', file_id, file_id)
+        )
+        
+        await update.message.reply_text("✅ QR code updated successfully!")
+        context.user_data['awaiting_qr'] = False
+
+# Main function
+def main():
+    """Start the bot."""
+    # Create application
+    application = Application.builder().token(BOT_TOKEN).build()
+    
+    # Add handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    application.add_handler(CallbackQueryHandler(button_callback, pattern="^(terms_agree|terms_decline|coupon_|payment_|back_to_menu|admin_|approve_|decline_).*$"))
+    application.add_handler(CallbackQueryHandler(handle_callback, pattern="^(submit_giftcard|paid_upi)$"))
+    
+    # Start bot
+    print("🤖 Bot is starting...")
+    application.run_polling()
+
+if __name__ == '__main__':
+    main()
