@@ -11,7 +11,7 @@ load_dotenv()
 
 # Telegram imports
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, ConversationHandler, filters
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 
 # Bot token and admin ID
 BOT_TOKEN = os.getenv('BOT_TOKEN')
@@ -49,8 +49,13 @@ def get_db_connection():
         logger.error(f"Database connection error: {e}")
         raise
 
-def execute_query(query, params=None, fetch='all'):
-    """Execute a database query"""
+def execute_query(query, params=None, fetch='none'):
+    """
+    Execute a database query
+    fetch: 'none' for no results (CREATE, INSERT, UPDATE, DELETE)
+           'one' for single row
+           'all' for multiple rows
+    """
     conn = None
     try:
         conn = get_db_connection()
@@ -61,7 +66,7 @@ def execute_query(query, params=None, fetch='all'):
             result = cur.fetchall()
         elif fetch == 'one':
             result = cur.fetchone()
-        else:
+        else:  # 'none' - for queries that don't return results
             result = None
             
         conn.commit()
@@ -76,11 +81,32 @@ def execute_query(query, params=None, fetch='all'):
         if conn:
             conn.close()
 
+def execute_insert(query, params=None):
+    """Execute an insert query"""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(query, params or ())
+        conn.commit()
+        cur.close()
+        return True
+    except Exception as e:
+        logger.error(f"Database insert error: {e}")
+        if conn:
+            conn.rollback()
+        raise
+    finally:
+        if conn:
+            conn.close()
+
 # Initialize database tables
 def init_database():
     """Create tables if they don't exist"""
     try:
-        # Users table
+        logger.info("Initializing database tables...")
+        
+        # Users table - use execute_query with fetch='none' for CREATE statements
         execute_query("""
             CREATE TABLE IF NOT EXISTS users (
                 id SERIAL PRIMARY KEY,
@@ -91,7 +117,8 @@ def init_database():
                 balance INTEGER DEFAULT 0,
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
             )
-        """)
+        """, fetch='none')
+        logger.info("✅ Users table ready")
         
         # Coupons table
         execute_query("""
@@ -104,7 +131,8 @@ def init_database():
                 used_at TIMESTAMP WITH TIME ZONE,
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
             )
-        """)
+        """, fetch='none')
+        logger.info("✅ Coupons table ready")
         
         # Orders table
         execute_query("""
@@ -115,7 +143,8 @@ def init_database():
                 amount INTEGER NOT NULL,
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
             )
-        """)
+        """, fetch='none')
+        logger.info("✅ Orders table ready")
         
         # Pending orders table
         execute_query("""
@@ -130,7 +159,8 @@ def init_database():
                 status TEXT DEFAULT 'pending',
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
             )
-        """)
+        """, fetch='none')
+        logger.info("✅ Pending orders table ready")
         
         # Settings table
         execute_query("""
@@ -139,7 +169,8 @@ def init_database():
                 qr_code_id TEXT,
                 updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
             )
-        """)
+        """, fetch='none')
+        logger.info("✅ Settings table ready")
         
         # Prices table
         execute_query("""
@@ -148,16 +179,25 @@ def init_database():
                 price INTEGER NOT NULL,
                 updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
             )
-        """)
+        """, fetch='none')
+        logger.info("✅ Prices table ready")
         
         # Insert default prices if not exists
         default_prices = [('500', 500), ('1K', 1000), ('2K', 2000), ('4K', 4000)]
         for price_type, price in default_prices:
-            execute_query("""
-                INSERT INTO prices (type, price, updated_at)
-                VALUES (%s, %s, NOW())
-                ON CONFLICT (type) DO NOTHING
-            """, (price_type, price))
+            # Check if price exists
+            result = execute_query(
+                "SELECT * FROM prices WHERE type = %s",
+                (price_type,),
+                fetch='one'
+            )
+            if not result:
+                execute_query(
+                    "INSERT INTO prices (type, price, updated_at) VALUES (%s, %s, NOW())",
+                    (price_type, price),
+                    fetch='none'
+                )
+                logger.info(f"✅ Default price for {price_type} inserted")
         
         logger.info("✅ Database tables initialized successfully")
     except Exception as e:
@@ -171,6 +211,8 @@ try:
 except Exception as e:
     logger.error(f"❌ Database connection failed: {e}")
     raise
+
+# [REST OF YOUR BOT CODE REMAINS THE SAME - all the keyboard functions, handlers, etc.]
 
 # User menu keyboard
 def get_user_keyboard():
