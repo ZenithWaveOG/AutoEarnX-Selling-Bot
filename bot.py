@@ -81,32 +81,13 @@ def execute_query(query, params=None, fetch='none'):
         if conn:
             conn.close()
 
-def execute_insert(query, params=None):
-    """Execute an insert query"""
-    conn = None
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute(query, params or ())
-        conn.commit()
-        cur.close()
-        return True
-    except Exception as e:
-        logger.error(f"Database insert error: {e}")
-        if conn:
-            conn.rollback()
-        raise
-    finally:
-        if conn:
-            conn.close()
-
 # Initialize database tables
 def init_database():
     """Create tables if they don't exist"""
     try:
         logger.info("Initializing database tables...")
         
-        # Users table - use execute_query with fetch='none' for CREATE statements
+        # Users table
         execute_query("""
             CREATE TABLE IF NOT EXISTS users (
                 id SERIAL PRIMARY KEY,
@@ -185,7 +166,6 @@ def init_database():
         # Insert default prices if not exists
         default_prices = [('500', 500), ('1K', 1000), ('2K', 2000), ('4K', 4000)]
         for price_type, price in default_prices:
-            # Check if price exists
             result = execute_query(
                 "SELECT * FROM prices WHERE type = %s",
                 (price_type,),
@@ -211,8 +191,6 @@ try:
 except Exception as e:
     logger.error(f"❌ Database connection failed: {e}")
     raise
-
-# [REST OF YOUR BOT CODE REMAINS THE SAME - all the keyboard functions, handlers, etc.]
 
 # User menu keyboard
 def get_user_keyboard():
@@ -299,7 +277,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             INSERT INTO users (user_id, username, first_name, last_name, balance, created_at)
             VALUES (%s, %s, %s, %s, 0, NOW())
             """,
-            (user_id, user.username, user.first_name, user.last_name)
+            (user_id, user.username, user.first_name, user.last_name),
+            fetch='none'
         )
     
     # Show appropriate keyboard (admin gets extra option)
@@ -326,6 +305,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_user_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user_id = update.effective_user.id
+    
+    logger.info(f"User {user_id} clicked: {text}")
     
     if text == "💰 Add Coins":
         await update.message.reply_text(
@@ -390,19 +371,30 @@ async def handle_user_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "4. If coupon shows redeem, try after some time (10-15min)."
         )
     
-    # Admin panel
-    elif text == "👑 Admin Panel" and user_id == ADMIN_ID:
-        await update.message.reply_text(
-            "Welcome to Admin Panel!",
-            reply_markup=get_admin_keyboard()
-        )
+    # Admin panel button handling
+    elif text == "👑 Admin Panel":
+        if user_id == ADMIN_ID:
+            logger.info(f"Admin {user_id} opening admin panel")
+            await update.message.reply_text(
+                "🔧 **Admin Panel**\n\nSelect an option:",
+                reply_markup=get_admin_keyboard(),
+                parse_mode='Markdown'
+            )
+        else:
+            await update.message.reply_text("❌ You are not authorized to access the admin panel.")
+    
+    else:
+        logger.warning(f"Unknown menu option: {text}")
 
 # Handle admin menu
 async def handle_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user_id = update.effective_user.id
     
+    logger.info(f"Admin {user_id} clicked admin option: {text}")
+    
     if user_id != ADMIN_ID:
+        await update.message.reply_text("❌ Unauthorized access.")
         return
     
     if text == "➕ Add Coupon":
@@ -430,13 +422,13 @@ async def handle_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             stocks[coupon_type] = result['count'] if result else 0
         
-        stock_text = "📊 Current Stock:\n\n"
-        stock_text += f"500 Coupons: {stocks['500']} available\n"
-        stock_text += f"1K Coupons: {stocks['1K']} available\n"
-        stock_text += f"2K Coupons: {stocks['2K']} available\n"
-        stock_text += f"4K Coupons: {stocks['4K']} available\n"
+        stock_text = "📊 **Current Stock:**\n\n"
+        stock_text += f"🔹 **500 Coupons:** {stocks['500']} available\n"
+        stock_text += f"🔹 **1K Coupons:** {stocks['1K']} available\n"
+        stock_text += f"🔹 **2K Coupons:** {stocks['2K']} available\n"
+        stock_text += f"🔹 **4K Coupons:** {stocks['4K']} available\n"
         
-        await update.message.reply_text(stock_text)
+        await update.message.reply_text(stock_text, parse_mode='Markdown')
     
     elif text == "💰 Change Prices":
         context.user_data['admin_action'] = 'price'
@@ -447,11 +439,11 @@ async def handle_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif text == "🔄 Update QR":
         context.user_data['awaiting_qr'] = True
-        await update.message.reply_text("Please send the new QR code image:")
+        await update.message.reply_text("📤 Please send the new QR code image:")
     
     elif text == "📋 Last 10 Buyers":
         result = execute_query("""
-            SELECT o.*, u.username, u.first_name 
+            SELECT o.*, u.username, u.first_name, u.user_id
             FROM orders o 
             JOIN users u ON o.user_id = u.user_id 
             ORDER BY o.created_at DESC 
@@ -459,16 +451,25 @@ async def handle_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """)
         
         if result:
-            buyers_text = "📋 Last 10 Buyers:\n\n"
-            for order in result:
-                buyers_text += f"👤 User: {order['first_name']} (@{order['username'] or 'N/A'})\n"
-                buyers_text += f"🎟️ Coupon: {order['coupon_code']}\n"
-                buyers_text += f"💰 Amount: {order['amount']} 🪙\n"
-                buyers_text += f"📅 Date: {order['created_at'][:10]}\n"
+            buyers_text = "📋 **Last 10 Buyers:**\n\n"
+            for i, order in enumerate(result, 1):
+                buyers_text += f"**{i}.** 👤 {order['first_name']} (@{order['username'] or 'N/A'})\n"
+                buyers_text += f"   🆔 User ID: `{order['user_id']}`\n"
+                buyers_text += f"   🎟️ Coupon: `{order['coupon_code']}`\n"
+                buyers_text += f"   💰 Amount: {order['amount']} 🪙\n"
+                buyers_text += f"   📅 Date: {order['created_at'][:19]}\n"
                 buyers_text += "━━━━━━━━━━━━━━━\n"
-            await update.message.reply_text(buyers_text)
+            await update.message.reply_text(buyers_text, parse_mode='Markdown')
         else:
-            await update.message.reply_text("No orders found.")
+            await update.message.reply_text("📭 No orders found yet.")
+    
+    elif text == "👑 Admin Panel":
+        # Just show the admin panel again
+        await update.message.reply_text(
+            "🔧 **Admin Panel**\n\nSelect an option:",
+            reply_markup=get_admin_keyboard(),
+            parse_mode='Markdown'
+        )
     
     elif text == "🔙 Back to User Menu":
         # Show admin the user menu with admin panel option
@@ -479,8 +480,15 @@ async def handle_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [KeyboardButton("👑 Admin Panel")]
         ]
         await update.message.reply_text(
-            "Returning to user menu...",
+            "🔙 Returning to user menu...",
             reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        )
+    
+    else:
+        logger.warning(f"Unknown admin option: {text}")
+        await update.message.reply_text(
+            "❌ Unknown option. Please use the admin panel buttons.",
+            reply_markup=get_admin_keyboard()
         )
 
 # Handle button callbacks
@@ -490,6 +498,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     data = query.data
     user_id = query.from_user.id
+    
+    logger.info(f"Callback from {user_id}: {data}")
     
     # Get user balance
     result = execute_query(
@@ -586,7 +596,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         elif data == "admin_back":
             await query.edit_message_text(
-                "Admin Panel"
+                "Admin Panel",
+                reply_markup=get_admin_keyboard()
             )
     
     # Admin approval/rejection
@@ -609,13 +620,15 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Add balance to user
             execute_query(
                 "UPDATE users SET balance = balance + %s WHERE user_id = %s",
-                (amount, user_id)
+                (amount, user_id),
+                fetch='none'
             )
             
             # Update order status
             execute_query(
                 "UPDATE pending_orders SET status = 'approved' WHERE id = %s",
-                (order_id,)
+                (order_id,),
+                fetch='none'
             )
             
             # Notify user
@@ -625,7 +638,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"💰 {amount} Diamonds have been added to your balance."
             )
             
-            await query.edit_message_text(f"Order {order_id} approved successfully!")
+            await query.edit_message_text(f"✅ Order {order_id} approved successfully!")
     
     elif data.startswith("decline_"):
         parts = data.split('_')
@@ -635,7 +648,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Update order status
         execute_query(
             "UPDATE pending_orders SET status = 'declined' WHERE id = %s",
-            (order_id,)
+            (order_id,),
+            fetch='none'
         )
         
         # Get user_id
@@ -654,7 +668,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "❌ Your payment has been declined. Please contact support for more information."
             )
         
-        await query.edit_message_text(f"Order {order_id} declined!")
+        await query.edit_message_text(f"❌ Order {order_id} declined!")
 
 # Handle additional callbacks
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -676,13 +690,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text
     
-    # Handle admin menu
-    if user_id == ADMIN_ID and text in ["👑 Admin Panel", "➕ Add Coupon", "➖ Remove Coupon", "📊 Stock", "💰 Change Prices", "🔄 Update QR", "📋 Last 10 Buyers", "🔙 Back to User Menu"]:
+    logger.info(f"Message from {user_id}: {text}")
+    
+    # CRITICAL: Check for admin panel first
+    if text == "👑 Admin Panel" and user_id == ADMIN_ID:
+        await handle_user_menu(update, context)
+        return
+    
+    # Check if this is an admin menu option
+    admin_options = ["➕ Add Coupon", "➖ Remove Coupon", "📊 Stock", "💰 Change Prices", 
+                     "🔄 Update QR", "📋 Last 10 Buyers", "🔙 Back to User Menu"]
+    
+    if text in admin_options and user_id == ADMIN_ID:
         await handle_admin_menu(update, context)
         return
     
-    # Handle regular user menu
-    if text in ["💰 Add Coins", "🎟️ Buy Coupon", "👤 Balance", "📦 My Orders", "🆘 Support", "⚠️ Disclaimer"]:
+    # Check if this is a regular user menu option
+    user_options = ["💰 Add Coins", "🎟️ Buy Coupon", "👤 Balance", "📦 My Orders", 
+                    "🆘 Support", "⚠️ Disclaimer"]
+    
+    if text in user_options:
         await handle_user_menu(update, context)
         return
     
@@ -730,7 +757,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Deduct balance
             execute_query(
                 "UPDATE users SET balance = balance - %s WHERE user_id = %s",
-                (total_price, user_id)
+                (total_price, user_id),
+                fetch='none'
             )
             
             # Get coupons
@@ -744,7 +772,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # Mark as used
                 execute_query(
                     "UPDATE coupons SET is_used = TRUE, used_by = %s, used_at = NOW() WHERE id = %s",
-                    (user_id, coupon['id'])
+                    (user_id, coupon['id']),
+                    fetch='none'
                 )
                 coupon_codes.append(coupon['code'])
             
@@ -753,7 +782,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for code in coupon_codes:
                 execute_query(
                     "INSERT INTO orders (id, user_id, coupon_code, amount, created_at) VALUES (%s, %s, %s, %s, NOW())",
-                    (order_id, user_id, code, price)
+                    (order_id, user_id, code, price),
+                    fetch='none'
                 )
             
             await update.message.reply_text(
@@ -860,6 +890,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif context.user_data.get('awaiting_coupons'):
         coupon_type = context.user_data.get('admin_coupon_type')
         coupons = text.split('\n')
+        success_count = 0
         
         for code in coupons:
             code = code.strip()
@@ -867,13 +898,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 try:
                     execute_query(
                         "INSERT INTO coupons (code, type, is_used, created_at) VALUES (%s, %s, FALSE, NOW())",
-                        (code, coupon_type)
+                        (code, coupon_type),
+                        fetch='none'
                     )
+                    success_count += 1
                 except Exception as e:
                     logger.error(f"Failed to insert coupon {code}: {e}")
                     await update.message.reply_text(f"⚠️ Failed to insert coupon: {code}")
         
-        await update.message.reply_text(f"✅ {len(coupons)} coupons added successfully!")
+        await update.message.reply_text(f"✅ {success_count} coupons added successfully!")
         context.user_data['awaiting_coupons'] = False
     
     # Admin: Remove coupons
@@ -896,7 +929,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for coupon in coupons_result:
                 execute_query(
                     "DELETE FROM coupons WHERE id = %s",
-                    (coupon['id'],)
+                    (coupon['id'],),
+                    fetch='none'
                 )
             
             await update.message.reply_text(f"✅ {quantity} coupons removed successfully!")
@@ -914,7 +948,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Update price
             execute_query(
                 "UPDATE prices SET price = %s, updated_at = NOW() WHERE type = %s",
-                (price, coupon_type)
+                (price, coupon_type),
+                fetch='none'
             )
             
             await update.message.reply_text(f"✅ Price for {coupon_type} changed to {price} successfully!")
@@ -922,24 +957,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
         except ValueError:
             await update.message.reply_text("Please send a valid number.")
+
+# Handle photos
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
     
-    # Admin: Update QR
-    elif context.user_data.get('awaiting_qr') and update.message.photo:
+    # Handle admin QR code update
+    if context.user_data.get('awaiting_qr') and user_id == ADMIN_ID:
         photo = update.message.photo[-1]
         file_id = photo.file_id
         
         # Save QR code to database
         execute_query(
             "INSERT INTO settings (key, qr_code_id, updated_at) VALUES (%s, %s, NOW()) ON CONFLICT (key) DO UPDATE SET qr_code_id = %s, updated_at = NOW()",
-            ('upi_qr', file_id, file_id)
+            ('upi_qr', file_id, file_id),
+            fetch='none'
         )
         
         await update.message.reply_text("✅ QR code updated successfully!")
         context.user_data['awaiting_qr'] = False
-
-# Handle photos
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+        return
     
     # Handle gift card screenshot
     if context.user_data.get('awaiting_screenshot'):
@@ -962,7 +999,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 file_id,
                 'amazon',
                 'pending'
-            )
+            ),
+            fetch='none'
         )
         
         # Notify admin
@@ -1010,7 +1048,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 file_id,
                 'upi',
                 'pending'
-            )
+            ),
+            fetch='none'
         )
         
         # Notify admin
@@ -1036,20 +1075,6 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         
         context.user_data['awaiting_upi_screenshot'] = False
-    
-    # Handle admin QR code update
-    elif context.user_data.get('awaiting_qr'):
-        photo = update.message.photo[-1]
-        file_id = photo.file_id
-        
-        # Save QR code to database
-        execute_query(
-            "INSERT INTO settings (key, qr_code_id, updated_at) VALUES (%s, %s, NOW()) ON CONFLICT (key) DO UPDATE SET qr_code_id = %s, updated_at = NOW()",
-            ('upi_qr', file_id, file_id)
-        )
-        
-        await update.message.reply_text("✅ QR code updated successfully!")
-        context.user_data['awaiting_qr'] = False
 
 # Main function
 def main():
@@ -1065,6 +1090,7 @@ def main():
     application.add_handler(CallbackQueryHandler(handle_callback, pattern="^(submit_giftcard|paid_upi)$"))
     
     # Start bot
+    logger.info("🤖 Bot is starting...")
     print("🤖 Bot is starting...")
     application.run_polling()
 
