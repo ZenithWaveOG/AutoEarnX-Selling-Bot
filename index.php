@@ -13,6 +13,7 @@
 // ✅ Buy Coupon workflow (show types + price + stock -> ask qty -> confirm/cancel -> deduct coins -> send codes -> save order)
 //
 // ✅ NEW: Added "BigBasket Chocolate" coupon type (works exactly like numeric types)
+// ✅ FIX: Validation uses string identifiers to avoid "Invalid type" error
 //
 // IMPORTANT NOTE (DB):
 // - Uses users.diamonds column as "coins" (no SQL change needed)
@@ -467,13 +468,13 @@ if ($message) {
         clear_state($user_id);
 
         // NEW: Added BigBasket Chocolate coupon type
-        $types = [500,1000,2000,4000, "bigbasket_chocolate"];
+        $types = ["500","1000","2000","4000","bigbasket_chocolate"];
         $out = "🛒 <b>Select a coupon type:</b>\n\n";
         foreach ($types as $c) {
             $price = get_price($c);
             $stock = stock_count($c);
             // Display name for BigBasket
-            $label = ($c === "bigbasket_chocolate") ? "BigBasket Chocolate" : (($c==1000 ? "1K" : ($c==2000 ? "2K" : ($c==4000 ? "4K" : "500"))));
+            $label = ($c === "bigbasket_chocolate") ? "BigBasket Chocolate" : (($c=="1000" ? "1K" : ($c=="2000" ? "2K" : ($c=="4000" ? "4K" : $c))));
             $out .= "• <b>{$label}</b> (🪙 <b>{$price}</b> coins) | Stock: <b>{$stock}</b>\n";
         }
 
@@ -493,9 +494,9 @@ if ($message) {
         $qty = intval($text);
         if ($qty <= 0) { sendMessage($chat_id, "❌ Quantity must be 1 or more. Send again:"); exit; }
 
-        $ctype = $data["ctype"] ?? 0; // could be string
-        // Validate type (allow string)
-        $valid_types = [500,1000,2000,4000, "bigbasket_chocolate"];
+        $ctype = $data["ctype"] ?? "0"; // can be string
+        // Validate type (allow string) – FIX: use string array
+        $valid_types = ["500","1000","2000","4000","bigbasket_chocolate"];
         if (!in_array($ctype, $valid_types, true)) {
             clear_state($user_id);
             sendMessage($chat_id, "❌ Invalid type. Please try again.", main_menu($is_admin));
@@ -521,7 +522,7 @@ if ($message) {
 
         $time = date("d M Y, h:i A");
         $summary = "📝 <b>Order Summary</b>\n━━━━━━━━━━━━━━━\n".
-                   "🎟️ Type: <b>".($ctype==="bigbasket_chocolate"?"BigBasket Chocolate":$ctype)."</b>\n". // show nice name
+                   "🎟️ Type: <b>".($ctype==="bigbasket_chocolate"?"BigBasket Chocolate":$ctype)."</b>\n".
                    "📦 Qty: <b>{$qty}</b>\n".
                    "🪙 Total Cost: <b>{$need}</b> coins\n".
                    "💰 Your Balance: <b>{$bal}</b>\n".
@@ -733,7 +734,7 @@ if ($message) {
     if ($text === "📦 Stock") {
         if (!$is_admin) { sendMessage($chat_id, "❌ Admin only."); exit; }
         // NEW: include bigbasket_chocolate
-        $types = [500,1000,2000,4000, "bigbasket_chocolate"];
+        $types = ["500","1000","2000","4000","bigbasket_chocolate"];
         $out = "📦 <b>Stock</b>\n━━━━━━━━━━━━━━━\n";
         foreach($types as $c){
             $label = ($c === "bigbasket_chocolate") ? "BigBasket Chocolate" : $c;
@@ -841,7 +842,7 @@ if ($message) {
         if (!$is_admin) { clear_state($user_id); exit; }
         if (!preg_match('/^\d+$/', $text)) { sendMessage($chat_id, "❌ Send a valid price number."); exit; }
         $price = intval($text);
-        $ctype = $data["ctype"] ?? 0; // can be string
+        $ctype = $data["ctype"] ?? "0"; // can be string
         set_price($ctype, $price);
         clear_state($user_id);
         sendMessage($chat_id, "✅ Price updated for {$ctype} => {$price} coins.", admin_menu());
@@ -850,7 +851,7 @@ if ($message) {
 
     if ($state === "ADMIN_AWAIT_ADD_CODES" && $text !== null) {
         if (!$is_admin) { clear_state($user_id); exit; }
-        $ctype = $data["ctype"] ?? 0;
+        $ctype = $data["ctype"] ?? "0";
         $lines = preg_split("/\r\n|\n|\r/", trim($text));
         $added = add_coupons($ctype, $lines);
         clear_state($user_id);
@@ -862,7 +863,7 @@ if ($message) {
         if (!$is_admin) { clear_state($user_id); exit; }
         if (!preg_match('/^\d+$/', $text)) { sendMessage($chat_id, "❌ Send a valid number."); exit; }
         $qty = intval($text);
-        $ctype = $data["ctype"] ?? 0;
+        $ctype = $data["ctype"] ?? "0";
         $removed = remove_coupons($ctype, $qty);
         clear_state($user_id);
         sendMessage($chat_id, "✅ Removed <b>{$removed}</b> from ".($ctype==="bigbasket_chocolate"?"BigBasket Chocolate":$ctype).".", admin_menu());
@@ -960,11 +961,12 @@ if ($callback) {
             exit;
         }
 
-        $ctype = $st["data"]["ctype"] ?? 0;
+        $ctype = $st["data"]["ctype"] ?? "0";
         $qty   = intval($st["data"]["qty"] ?? 0);
         $need  = intval($st["data"]["need"] ?? 0);
 
-        $valid_types = [500,1000,2000,4000, "bigbasket_chocolate"];
+        // FIX: use string array for validation
+        $valid_types = ["500","1000","2000","4000","bigbasket_chocolate"];
         if (!in_array($ctype, $valid_types, true) || $qty<=0 || $need<=0) {
             clear_state($user_id);
             answerCallback($cb_id, "Invalid purchase.", true);
