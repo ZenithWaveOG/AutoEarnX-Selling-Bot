@@ -549,7 +549,7 @@ if ($message) {
     if ($state === "AWAIT_AMAZON_COINS" && $text !== null) {
         if (!preg_match('/^\d+$/', $text)) { sendMessage($chat_id, "❌ Send a valid number (minimum 30)."); exit; }
         $coins = intval($text);
-        if ($coins < 20) { sendMessage($chat_id, "❌ Minimum is 20 coins. Send again:"); exit; }
+        if ($coins < 30) { sendMessage($chat_id, "❌ Minimum is 30 coins. Send again:"); exit; }
 
         $order_id = create_order($user_id, "DEPOSIT", "PENDING", [
             "method" => "AMAZON",
@@ -629,7 +629,7 @@ if ($message) {
     if ($state === "AWAIT_UPI_COINS" && $text !== null) {
         if (!preg_match('/^\d+$/', $text)) { sendMessage($chat_id, "❌ Send a valid number (minimum 30)."); exit; }
         $coins = intval($text);
-        if ($coins < 20) { sendMessage($chat_id, "❌ Minimum is 20 coins. Send again:"); exit; }
+        if ($coins < 30) { sendMessage($chat_id, "❌ Minimum is 30 coins. Send again:"); exit; }
 
         $qr_file_id = get_setting("upi_qr_file_id");
         if (!$qr_file_id) {
@@ -1098,4 +1098,3 @@ if ($callback) {
 }
 
 echo "OK";
-
