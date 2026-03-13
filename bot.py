@@ -4,8 +4,7 @@ import random
 import string
 import asyncio
 import threading
-import sys
-from datetime import datetime, timedelta
+from datetime import datetime
 from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
@@ -27,24 +26,20 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ---------- Initialize settings (bot_status, etc.) ----------
 def init_settings():
-    # Ensure bot_status exists
     status = supabase.table('settings').select('*').eq('key', 'bot_status').execute()
     if not status.data:
         supabase.table('settings').insert({'key': 'bot_status', 'value': 'on'}).execute()
-    # (Other settings like qr_image are handled elsewhere)
 init_settings()
 
-# Setup logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
 # ==================== CONSTANTS ====================
 COUPON_TYPES = ['500', '1000', '2000', '4000']
-QUANTITY_OPTIONS = [1, 5, 10, 20]
 
 # Conversation states
 SELECTING_COUPON_TYPE, SELECTING_QUANTITY, CUSTOM_QUANTITY = range(3)
 WAITING_PAYER_NAME, WAITING_PAYMENT_SCREENSHOT = range(3, 5)
-ASK_COUPON, ENTER_COUPON = range(5, 7)  # new states
+ASK_COUPON, ENTER_COUPON = range(5, 7)
 
 # ==================== HELPER FUNCTIONS ====================
 def get_main_menu():
@@ -140,13 +135,23 @@ async def check_bot_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return False
     return True
 
+# ---------- End all active conversations for a user ----------
+def end_all_conversations(context: ContextTypes.DEFAULT_TYPE, user_id: int, chat_id: int):
+    """Forcefully end any ongoing ConversationHandler for this user/chat."""
+    for handler in context.application.handlers.get(0, []):
+        if isinstance(handler, ConversationHandler):
+            key = (user_id, chat_id)
+            if key in handler.conversations:
+                del handler.conversations[key]
+
 # ==================== HANDLERS ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_bot_status(update, context):
         return
-    # Clear any previous discount data
+    # Clear any previous discount data and end any conversations
     context.user_data.pop('discount_code', None)
     context.user_data.pop('discount_value', None)
+    end_all_conversations(context, update.effective_user.id, update.effective_chat.id)
 
     user = update.effective_user
     supabase.table('users').upsert({
@@ -155,7 +160,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'first_name': user.first_name
     }).execute()
 
-    stock_msg = "✏️ AUTOEARNX CODE SHOP\n━━━━━━━━━━━━━━\n📊 Current Stock\n\n"
+    stock_msg = "✏️ PROXY CODE SHOP\n━━━━━━━━━━━━━━\n📊 Current Stock\n\n"
     for ct in COUPON_TYPES:
         count = supabase.table('coupons').select('*', count='exact').eq('type', ct).eq('is_used', False).execute()
         stock = count.count if hasattr(count, 'count') else 0
@@ -171,6 +176,7 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     text = update.message.text
 
+    # Admin actions take precedence
     if user.id in ADMIN_IDS and (
         'admin_action' in context.user_data or
         context.user_data.get('broadcast') or
@@ -207,10 +213,10 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await update.message.reply_text(disclaimer)
     elif text == "🆘 Support":
-        await update.message.reply_text("🆘 Support Contact:\n━━━━━━━━━━━━━━\n@AutoEarnX_Support")
+        await update.message.reply_text("🆘 Support Contact:\n━━━━━━━━━━━━━━\n@ProxySupportChat_bot")
     elif text == "📢 Our Channels":
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("@AutoEarnX_Shein", url="https://t.me/AutoEarnX_Shein")]
+            [InlineKeyboardButton("@PROXY_LOOTERS", url="https://t.me/PROXY_LOOTERS")]
         ])
         await update.message.reply_text("📢 Join our official channels for updates and deals:", reply_markup=keyboard)
     else:
@@ -240,11 +246,11 @@ async def have_coupon_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         return ENTER_COUPON
     else:
         await query.edit_message_text("🛒 Select a coupon type:", reply_markup=get_coupon_type_keyboard())
-        return
+        return ConversationHandler.END  # Ensure conversation ends
 
 async def enter_coupon_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_bot_status(update, context):
-        return
+        return ConversationHandler.END
     code = update.message.text.strip().upper()
     discount = supabase.table('discount_codes').select('*').eq('code', code).eq('used', False).execute()
     if discount.data:
@@ -256,10 +262,11 @@ async def enter_coupon_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             context.user_data['discount_value'] = discount.data[0]['value']
             await update.message.reply_text(f"Coupon accepted! You get ₹{discount.data[0]['value']} off.")
             await update.message.reply_text("🛒 Select a coupon type:", reply_markup=get_coupon_type_keyboard())
-            return
+            return ConversationHandler.END
     else:
         await update.message.reply_text("Invalid or already used coupon code. Continuing without discount.")
     await update.message.reply_text("🛒 Select a coupon type:", reply_markup=get_coupon_type_keyboard())
+    return ConversationHandler.END
 
 # --- Coupon type selection ---
 async def coupon_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -518,6 +525,9 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id not in ADMIN_IDS:
         await query.edit_message_text("Unauthorized.")
         return
+
+    # End any ongoing conversations to avoid interference
+    end_all_conversations(context, update.effective_user.id, update.effective_chat.id)
 
     data = query.data
     context.user_data.pop('broadcast', None)
