@@ -15,17 +15,14 @@ from supabase import create_client, Client
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
-ADMIN_IDS = [int(id) for id in os.environ.get("ADMIN_IDS", "8537079657").split(",")]  # comma-separated
+ADMIN_IDS = [int(id) for id in os.environ.get("ADMIN_IDS", "8537079657").split(",")]
 
-# Webhook URL: set WEBHOOK_URL or RENDER_EXTERNAL_URL
 WEBHOOK_URL = os.environ.get("WEBHOOK_URL") or os.environ.get("RENDER_EXTERNAL_URL")
 if not WEBHOOK_URL:
     raise ValueError("WEBHOOK_URL or RENDER_EXTERNAL_URL must be set")
 
-# Initialize Supabase
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# Setup logging
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -37,82 +34,10 @@ SELECTING_COUPON_TYPE, SELECTING_QUANTITY, CUSTOM_QUANTITY = range(3)
 WAITING_PAYER_NAME, WAITING_PAYMENT_SCREENSHOT = range(3, 5)
 ENTER_COUPON = 5
 
-# ==================== DATABASE SCHEMA ====================
-# Run this SQL in Supabase SQL editor:
+# ==================== DATABASE SCHEMA (run in Supabase) ====================
 """
--- Users table
-CREATE TABLE users (
-    user_id BIGINT PRIMARY KEY,
-    username TEXT,
-    first_name TEXT,
-    joined_at TIMESTAMP DEFAULT NOW()
-);
-
--- Coupons table (voucher codes)
-CREATE TABLE coupons (
-    id SERIAL PRIMARY KEY,
-    type TEXT NOT NULL,
-    code TEXT NOT NULL UNIQUE,
-    is_used BOOLEAN DEFAULT FALSE,
-    used_by BIGINT,
-    used_at TIMESTAMP,
-    created_at TIMESTAMP DEFAULT NOW()
-);
-
--- Orders table
-CREATE TABLE orders (
-    id SERIAL PRIMARY KEY,
-    order_id TEXT UNIQUE,
-    user_id BIGINT,
-    coupon_type TEXT,
-    quantity INTEGER,
-    total_price DECIMAL(10,2),
-    status TEXT DEFAULT 'pending',
-    created_at TIMESTAMP DEFAULT NOW()
-);
-
--- Prices table with min_quantity
-CREATE TABLE prices (
-    coupon_type TEXT PRIMARY KEY,
-    price_1 DECIMAL(10,2),
-    price_5 DECIMAL(10,2),
-    price_10 DECIMAL(10,2),
-    price_20 DECIMAL(10,2),
-    min_quantity INTEGER DEFAULT 1
-);
-
--- Discount codes
-CREATE TABLE discount_codes (
-    id SERIAL PRIMARY KEY,
-    code TEXT UNIQUE NOT NULL,
-    value DECIMAL(10,2) NOT NULL,
-    used BOOLEAN DEFAULT FALSE,
-    created_by BIGINT,
-    created_at TIMESTAMP DEFAULT NOW(),
-    expires_at TIMESTAMP
-);
-
--- Settings
-CREATE TABLE settings (
-    key TEXT PRIMARY KEY,
-    value TEXT
-);
-
--- Insert default prices
-INSERT INTO prices (coupon_type, price_1, price_5, price_10, price_20, min_quantity) VALUES
-    ('500', 10, 45, 80, 150, 1),
-    ('1000', 18, 85, 160, 300, 1),
-    ('2000', 35, 160, 300, 550, 1),
-    ('4000', 60, 280, 500, 950, 1)
-ON CONFLICT (coupon_type) DO UPDATE SET
-    price_1 = EXCLUDED.price_1,
-    price_5 = EXCLUDED.price_5,
-    price_10 = EXCLUDED.price_10,
-    price_20 = EXCLUDED.price_20,
-    min_quantity = EXCLUDED.min_quantity;
-
--- Insert default bot status
-INSERT INTO settings (key, value) VALUES ('bot_status', 'on') ON CONFLICT DO NOTHING;
+-- Add discount_code column to orders
+ALTER TABLE orders ADD COLUMN discount_code TEXT;
 """
 
 # ==================== HELPER FUNCTIONS ====================
@@ -211,7 +136,6 @@ async def check_bot_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_bot_status(update, context):
         return
-    # Clear any previous user data
     context.user_data.clear()
     user = update.effective_user
     supabase.table("users").upsert({
@@ -220,7 +144,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "first_name": user.first_name
     }).execute()
 
-    stock_msg = "✏️ PROXY CODE SHOP\n━━━━━━━━━━━━━━\n📊 Current Stock\n\n"
+    stock_msg = "✏️ AUTO EARNX CODE SHOP\n━━━━━━━━━━━━━━\n📊 Current Stock\n\n"
     for ct in COUPON_TYPES:
         count = supabase.table("coupons").select("*", count="exact").eq("type", ct).eq("is_used", False).execute()
         stock = count.count if hasattr(count, "count") else 0
@@ -236,7 +160,6 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     text = update.message.text
 
-    # Admin actions take precedence
     if user.id in ADMIN_IDS and context.user_data.get("admin_action"):
         await admin_message_handler(update, context)
         return
@@ -269,10 +192,10 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await update.message.reply_text(disclaimer)
     elif text == "🆘 Support":
-        await update.message.reply_text("🆘 Support Contact:\n━━━━━━━━━━━━━━\n@ProxySupportChat_bot")
+        await update.message.reply_text("🆘 Support Contact:\n━━━━━━━━━━━━━━\n@AutoEarnX_Support")
     elif text == "📢 Our Channels":
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("@PROXY_LOOTERS", url="https://t.me/PROXY_LOOTERS")]
+            [InlineKeyboardButton("@AutoEarnX_Shein", url="https://t.me/AutoEarnX_Shein")]
         ])
         await update.message.reply_text("📢 Join our official channels for updates and deals:", reply_markup=keyboard)
     else:
@@ -381,7 +304,7 @@ async def custom_quantity_input(update: Update, context: ContextTypes.DEFAULT_TY
 
 async def process_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE, qty):
     ctype = context.user_data["coupon_type"]
-    # Check stock again
+    # Check stock
     count = supabase.table("coupons").select("*", count="exact").eq("type", ctype).eq("is_used", False).execute()
     stock = count.count if hasattr(count, "count") else 0
     if stock < qty:
@@ -393,6 +316,7 @@ async def process_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE, q
         await (update.message or update.callback_query.message).reply_text("Price error.")
         return
     p = prices.data[0]
+    # Price bracket logic (bulk discount)
     if qty <= 1:
         price_per = p["price_1"]
     elif qty <= 5:
@@ -403,9 +327,10 @@ async def process_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE, q
         price_per = p["price_20"]
     total = price_per * qty
 
-    discount = context.user_data.get("discount_value", 0)
-    if discount:
-        total -= discount
+    discount_code = context.user_data.get("discount_code")
+    discount_value = context.user_data.get("discount_value", 0)
+    if discount_value:
+        total -= discount_value
         if total < 0:
             total = 0
 
@@ -414,14 +339,22 @@ async def process_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE, q
     context.user_data["qty"] = qty
     context.user_data["total"] = total
 
-    supabase.table("orders").insert({
+    # Insert order with discount_code (if any)
+    order_data = {
         "order_id": order_id,
         "user_id": update.effective_user.id,
         "coupon_type": ctype,
         "quantity": qty,
         "total_price": total,
         "status": "pending"
-    }).execute()
+    }
+    if discount_code:
+        order_data["discount_code"] = discount_code
+    supabase.table("orders").insert(order_data).execute()
+
+    # Remove discount from user_data after order creation
+    context.user_data.pop("discount_code", None)
+    context.user_data.pop("discount_value", None)
 
     qr_setting = supabase.table("settings").select("value").eq("key", "qr_image").execute()
     qr_file_id = qr_setting.data[0]["value"] if qr_setting.data and qr_setting.data[0]["value"] else None
@@ -431,8 +364,8 @@ async def process_quantity(update: Update, context: ContextTypes.DEFAULT_TYPE, q
         f"🆔 {order_id}\n"
         f"📦 {ctype} Off (x{qty})\n"
     )
-    if discount:
-        invoice_text += f"🎟️ Discount: -₹{discount}\n"
+    if discount_value:
+        invoice_text += f"🎟️ Discount: -₹{discount_value}\n"
     invoice_text += (
         f"💰 Pay Exactly: ₹{total}\n"
         f"⚠️ CRITICAL: You MUST pay exact amount. Do not ignore the paise (decimals), or the bot will NOT find your payment!\n\n"
@@ -503,7 +436,6 @@ async def payment_screenshot_handler(update: Update, context: ContextTypes.DEFAU
             logger.error(f"Failed to send to admin {admin_id}: {e}")
 
     await update.message.reply_text("Verification request sent to admin. Please wait for approval.")
-    # Clear verification data
     context.user_data.pop("verify_order_id", None)
     context.user_data.pop("payer_name", None)
     return ConversationHandler.END
@@ -542,8 +474,9 @@ async def admin_accept_decline(update: Update, context: ContextTypes.DEFAULT_TYP
 
         supabase.table("orders").update({"status": "completed"}).eq("order_id", order_id).execute()
 
-        # Mark discount code as used if present (if we stored it in order, we'd do it here)
-        # For now, we don't have discount info in this callback.
+        # Mark discount code as used if present
+        if o.get("discount_code"):
+            supabase.table("discount_codes").update({"used": True}).eq("code", o["discount_code"]).execute()
 
         codes_text = "\n".join(codes)
         await context.bot.send_message(
@@ -574,7 +507,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Unauthorized.")
         return
 
-    # Clear any previous admin action state
     context.user_data.pop("admin_action", None)
     context.user_data.pop("broadcast", None)
     context.user_data.pop("awaiting_qr", None)
@@ -850,7 +782,6 @@ def home():
     return "Bot is running!", 200
 
 if __name__ == "__main__":
-    # Run the application using Flask (webhook mode)
     application.run_webhook(
         listen="0.0.0.0",
         port=int(os.environ.get("PORT", 5000)),
