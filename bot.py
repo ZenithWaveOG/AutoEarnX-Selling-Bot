@@ -196,7 +196,7 @@ async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await update.message.reply_text(disclaimer)
     elif text == "🆘 Support":
-        await update.message.reply_text("🆘 Support Contact:\n━━━━━━━━━━━━━━\n@AutoEarnX_Support")
+        await update.message.reply_text("🆘 Support Contact:\n━━━━━━━━━━━━━━\n@AutoEarnX_SupportBot")
     elif text == "📢 Our Channels":
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("@GaganXShein", url="https://t.me/GaganXShein")]
